@@ -6,6 +6,7 @@ Simulations were made using the IBM Qiskit software version:
   - qiskit-aqua 0.4.0
 
 Implementation of the quantum maximum finding algorithm compatible with qiskit aqua.
+Tests of the quantum sparse sampling algorithm for different stochastic MDP's are present in the stochastic_mdp_test.ipynb notebook
 
 ######################################################
 ################# qAlgorithms.py #####################
