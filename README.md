@@ -2,7 +2,7 @@
 
 Work done in my master thesis "Quantum-enhanced Reinforcement Learning". Developed a quantum version of the classical RL algorithm Sparse Sampling by Kearns et.al
 Simulations were made using the IBM Qiskit software version:
-  - qiskit 0.6.0
+  - qiskit 0.14.0
   - qiskit-aqua 0.4.0
 
 Implementation of the quantum maximum finding algorithm compatible with qiskit aqua.
