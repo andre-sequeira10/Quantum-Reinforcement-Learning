@@ -1,23 +1,18 @@
 from qiskit import QuantumCircuit,QuantumRegister,ClassicalRegister
-from qiskit import Aer,IBMQ
-from qiskit import execute
-from qiskit.tools import visualization
-from qiskit.tools.visualization import circuit_drawer, plot_histogram
 import matplotlib.pyplot as plt
-from executeCircuit import execute_locally,extractClassical,show_results
+from executeCircuit import execute_locally
 import math 
-from math import pi
 import numpy as np 
 from qiskit.aqua import AquaError
 from qArithmetic import increment
-from qiskit.exceptions import QiskitError
-from qiskit.circuit import Instruction
-from qiskit.extensions.standard.x import XGate, CXGate
-from qiskit.extensions.standard.ry import RYGate,CRYGate
-from qiskit.extensions.standard.rz import RZGate,CRZGate
-from qiskit.circuit.reset import Reset
-from qAlgorithms import ctrl_initialize , Grover
-from qOracles import searchOracle
+#from qiskit.exceptions import QiskitError
+#from qiskit.circuit import Instruction
+from qiskit.circuit.library import RYGate,CRYGate, XGate, CXGate,RZGate,CRZGate
+from qiskit.circuit.library import MCMT
+#from qiskit.circuit.reset import Reset
+#from qAlgorithms import Grover , QMF
+#from qOracles import searchOracle
+from controlled_init import ctrl_initialize
 import operator 
 
 '''
@@ -25,11 +20,11 @@ CLASS for the Quantum GridWorld Environment
 elements are passed from the classical environment:
 	-> # states |S|  and # actions |A| 
 	-> reward_model is passed in the transition kernel
-	-> transitionKernel given as tuples tkernel [s][a] = [(p,s',r),  ... ]
+	-> transitionKernel given as tuples [s][a] = [(p,s',r),  ... ]
 '''
 
 class quantum_sparse_sampling:
-	def __init__(self,states=None,actions=None,tKernel=None,gamma=1.0,is_stochastic=True,env=None):
+	def __init__(self,states=None,actions=None,tKernel=None,rewardModel=None, gamma=1.0,is_stochastic=True,env=None):
 		
 		if states is None:
 			raise AquaError("Missing State space")
@@ -53,10 +48,23 @@ class quantum_sparse_sampling:
 
 		#Transition Kernel tKernel[state][action] -> Probability | sprime | reward
 		#Turn states into into binary and probability into sqrt(probability)
-		self.tk = np.zeros((self.states,self.actions),dtype=object)
+		if self.is_stochastic:
+			self.tk = np.zeros((self.states,self.actions),dtype=object)
+		else:
+			self.tk = []
+			for (s,a,s_) in tKernel:
+				self.tk.append((bin(s)[2:].zfill(self.sqbits), bin(a)[2:].zfill(self.aqbits), bin(s_)[2:].zfill(self.sqbits)))
+			if rewardModel is None:
+				raise AquaError("Missing reward model")
+
+			self.reward_model = rewardModel
+
 		self.reward_max = -1
 		self.rewards = []
-		self.is_openai = len(tKernel[0][0][0]) == 4
+		if self.is_stochastic:
+			self.is_openai = len(tKernel[0][0][0]) == 1100
+		else:
+			self.is_openai = False
 		self.env = env
 
 		if self.is_openai:
@@ -76,8 +84,9 @@ class quantum_sparse_sampling:
 						self.rewards.append((bin(sp)[2:].zfill(self.sqbits),r))
 						if r > self.reward_max: 
 							self.reward_max = r
-		
-		else:
+			self.rewards = set(self.rewards)
+
+		elif self.is_stochastic:
 			for s in range(self.states):
 				for a in range(self.actions):
 					self.tk[s][a] = [(math.sqrt(p),sprime,reward) for (p,sprime,reward) in tKernel[s][a]]
@@ -91,7 +100,7 @@ class quantum_sparse_sampling:
 			self.positions = np.arange(self.states).reshape(self.sqbits,self.sqbits)
 		#self.rewards = set(self.rewards)
 
-	def stochastic_transition_oracle(self,step,R):
+	def stochastic_transition_oracle(self,step,R,reward_oracle="state-action"):
 		#create new circuit to make call to the oracle efficient. Theres no need to run this for loops if we 
 		#can just past a circuit with these logic gates combinations
 		st_circuit = QuantumCircuit(name="qEnv")
@@ -102,6 +111,7 @@ class quantum_sparse_sampling:
 		st_circuit.add_register(st_s,st_a,st_sprime,st_r)
 
 		if self.env == "grid":
+			
 			new_neighbours=[]
 			for s in self.neighbours:
 				for a in range(self.actions):
@@ -121,14 +131,17 @@ class quantum_sparse_sampling:
 
 					#ctr_initialization to make the transition
 					st_circuit.ctrl_initialize(statevector=state,ctrl_state=abin+sbin,ctrl_qubits=ctrls,qubits=st_sprime)
+					if reward_oracle == "state-action":
+						regs = [i for i in st_s]+[i for i in st_a]+[i for i in st_sprime]+[i for i in st_r]
 					
-					regs = [i for i in st_s]+[i for i in st_a]+[i for i in st_sprime]+[i for i in st_r]
+					else:
+						regs = [i for i in st_sprime]+[i for i in st_r]
 
 					for (p,sp,r) in self.tk[s][a]:
 						
 						if r>0:
 							spbin = bin(sp)[2:].zfill(self.sqbits)
-							st_circuit.append(self.stochastic_reward_oracle(sbin,abin,spbin,r,step-1,R),regs)
+							st_circuit.append(self.stochastic_reward_oracle(sbin,abin,spbin,r,step-1,R,reward_oracle=reward_oracle),regs)
 						'''
 						spbin = bin(sp)[2:].zfill(self.sqbits)
 						st_circuit.append(self.stochastic_reward_oracle(sbin,abin,spbin,r,step-1,R),regs)
@@ -155,12 +168,16 @@ class quantum_sparse_sampling:
 						#ctr_initialization to make the transition
 						st_circuit.ctrl_initialize(statevector=state,ctrl_state=abin+sbin,ctrl_qubits=ctrls,qubits=st_sprime)
 						
-						regs = [i for i in st_s]+[i for i in st_a]+[i for i in st_sprime]+[i for i in st_r]
+						if reward_oracle == "state-action":
+							regs = [i for i in st_s]+[i for i in st_a]+[i for i in st_sprime]+[i for i in st_r]
+						
+						else:
+							regs = [i for i in st_sprime]+[i for i in st_r]
 
 						for (p,sp,r) in self.tk[s][a]:
 							spbin = bin(sp)[2:].zfill(self.sqbits)
-							st_circuit.append(self.stochastic_reward_oracle(sbin,abin,spbin,r,step-1,R),regs)
-			else:			
+							st_circuit.append(self.stochastic_reward_oracle(sbin,abin,spbin,r,step-1,R,reward_oracle=reward_oracle),regs)
+			else:		
 				for s in range(self.states):
 					for a in range(self.actions):
 						#prepare complex vector from the transition probabilities 
@@ -176,50 +193,84 @@ class quantum_sparse_sampling:
 						#ctr_initialization to make the transition
 						st_circuit.ctrl_initialize(statevector=state,ctrl_state=abin+sbin,ctrl_qubits=ctrls,qubits=st_sprime)
 						
-						regs = [i for i in st_s]+[i for i in st_a]+[i for i in st_sprime]+[i for i in st_r]
+						if reward_oracle == "state-action":
+							regs = [i for i in st_s]+[i for i in st_a]+[i for i in st_sprime]+[i for i in st_r]
+					
+						else:
+							regs = [i for i in st_sprime]+[i for i in st_r]
 
 						for (p,sp,r) in self.tk[s][a]:
 							spbin = bin(sp)[2:].zfill(self.sqbits)
-							st_circuit.append(self.stochastic_reward_oracle(sbin,abin,spbin,r,step-1,R),regs)
+							st_circuit.append(self.stochastic_reward_oracle(sbin,abin,spbin,r,step-1,R,reward_oracle=reward_oracle),regs)
 
 		return st_circuit
 
-	def stochastic_reward_oracle(self,s,a,sp,r,step,R):
+	def stochastic_reward_oracle(self,s,a,sp,r,step,R,reward_oracle="state-action"):
+
 		#APPEND REWARD AS A ROTATION IN THE Y AXIS TO TURN INTO PROBABILITY
-		qr = QuantumRegister(1)
-		qrs = QuantumRegister(self.sqbits)
-		qra = QuantumRegister(self.aqbits)
-		qrsp = QuantumRegister(self.sqbits)
-
-		qc = QuantumCircuit(qrs,qra,qrsp,qr,name="Reward Oracle t={}".format(step))
 		
-		#reward function: Ry gates rotates by theta/2
-		reward_step = (np.pi)/(2*R) * (r*self.gamma**step/self.reward_max)
-		#reward_step = (pi/10) * ((self.gamma**step * r)/self.reward_max)
-		for i,j in zip(range(len(s)),reversed(range(len(s)))):
-			if s[i] == '0':
-				qc.x(qrs[j])
-		for i,j in zip(range(len(a)),reversed(range(len(a)))):
-			if a[i] == '0':
-				qc.x(qra[j])
-		for i,j in zip(range(len(sp)),reversed(range(len(sp)))):
-			if sp[i] == '0':
-				qc.x(qrsp[j])
+		if reward_oracle == "state-action":
+			qr = QuantumRegister(1)
+			qrs = QuantumRegister(self.sqbits)
+			qra = QuantumRegister(self.aqbits)
+			qrsp = QuantumRegister(self.sqbits)
 
-		#cry_gate = RYGate(reward_step).control(num_ctrl_qubits=2*self.sqbits+self.aqbits,ctrl_state=sp+a+s) 
-		cry_gate = RYGate(reward_step).control(num_ctrl_qubits=2*self.sqbits+self.aqbits) 
-		qc.append(cry_gate,[i for i in qrs]+[i for i in qra]+[i for i in qrsp]+[i for i in qr])
-		for i,j in zip(range(len(s)),reversed(range(len(s)))):
-			if s[i] == '0':
-				qc.x(qrs[j])
-		for i,j in zip(range(len(a)),reversed(range(len(a)))):
-			if a[i] == '0':
-				qc.x(qra[j])
-		for i,j in zip(range(len(sp)),reversed(range(len(sp)))):
-			if sp[i] == '0':
-				qc.x(qrsp[j])
-		
+			qc = QuantumCircuit(qrs,qra,qrsp,qr,name="Reward Oracle t={}".format(step))
+			
+			#reward function: Ry gates rotates by theta/2
+			gamma_norm = (self.gamma - 1)/((self.gamma**self.horizon) - 1)
+			reward_step = np.pi * gamma_norm * (self.gamma**step) * (r/self.reward_max)
+			#reward_step = (pi/10) * ((self.gamma**step * r)/self.reward_max)
+			for i,j in zip(range(len(s)),reversed(range(len(s)))):
+				if s[i] == '0':
+					qc.x(qrs[j])
+			for i,j in zip(range(len(a)),reversed(range(len(a)))):
+				if a[i] == '0':
+					qc.x(qra[j])
+			for i,j in zip(range(len(sp)),reversed(range(len(sp)))):
+				if sp[i] == '0':
+					qc.x(qrsp[j])
+
+			#cry_gate = RYGate(reward_step).control(num_ctrl_qubits=2*self.sqbits+self.aqbits,ctrl_state=sp+a+s) 
+			cry_gate = RYGate(reward_step).control(num_ctrl_qubits=2*self.sqbits+self.aqbits) 
+			qc.append(cry_gate,[i for i in qrs]+[i for i in qra]+[i for i in qrsp]+[i for i in qr])
+			for i,j in zip(range(len(s)),reversed(range(len(s)))):
+				if s[i] == '0':
+					qc.x(qrs[j])
+			for i,j in zip(range(len(a)),reversed(range(len(a)))):
+				if a[i] == '0':
+					qc.x(qra[j])
+			for i,j in zip(range(len(sp)),reversed(range(len(sp)))):
+				if sp[i] == '0':
+					qc.x(qrsp[j])
+
+		else:
+			
+			qr = QuantumRegister(1)
+			qrsp = QuantumRegister(self.sqbits)
+
+			qc = QuantumCircuit(qrsp,qr,name="Reward Oracle t={}".format(step))
+			
+			#reward function: Ry gates rotates by theta/2
+			gamma_norm = (self.gamma - 1)/((self.gamma**self.horizon) - 1)
+			reward_step = np.pi * gamma_norm * (self.gamma**step) * (r/self.reward_max)
+			#reward_step = (pi/10) * ((self.gamma**step * r)/self.reward_max)
+
+			for i,j in zip(range(len(sp)),reversed(range(len(sp)))):
+				if sp[i] == '0':
+					qc.x(qrsp[j])
+
+			#cry_gate = RYGate(reward_step).control(num_ctrl_qubits=2*self.sqbits+self.aqbits,ctrl_state=sp+a+s) 
+			cry_gate = RYGate(reward_step).control(num_ctrl_qubits=self.sqbits) 
+
+			qc.append(cry_gate,[i for i in qrsp]+[i for i in qr])
+			
+			for i,j in zip(range(len(sp)),reversed(range(len(sp)))):
+				if sp[i] == '0':
+					qc.x(qrsp[j])
+					
 		return qc
+
 
 	def stateActionTransitionOracle(self,currentState,newState,step):
 		self.qc.barrier()
@@ -284,7 +335,7 @@ class quantum_sparse_sampling:
 
 		
 
-	def step(self,initState=0,horizon="infinite"):
+	def step(self,initState=0, horizon="infinite", reward_oracle="state-action"):
 
 		#if horizon is infinite then the system evolves until the end of the computer resources 
 		#self.horizon = self.nstates/2 if horizon=="infinite" else horizon
@@ -327,7 +378,7 @@ class quantum_sparse_sampling:
 			self.states_visited = [initState]
 			oracles={}
 			for i in range(1,self.horizon+1):
-				oracles[i] = self.stochastic_transition_oracle(i,R)
+				oracles[i] = self.stochastic_transition_oracle(i,R,reward_oracle=reward_oracle)
 				self.st["st{0}".format(i)] = QuantumRegister(self.sqbits,"stateTransition{0}".format(i))
 				self.qc.add_register(self.st["st{0}".format(i)])
 				
@@ -391,7 +442,7 @@ class quantum_sparse_sampling:
 				return self.qc.draw(output=mode)
 
 	#AMPLITUDE AMPLIFCATION BY HOYER,P BRASSARD ET.AL https://arxiv.org/pdf/quant-ph/0005055.pdf
-	def Grover_Iterate(self,circuit,ctrls,regs):
+	def Grover_Iterate(self,circuit,ctrls,regs,ancilla_reg):
 					
 					#invert phase o \1> terms
 					circuit.z(self.qr)
@@ -412,7 +463,8 @@ class quantum_sparse_sampling:
 					circuit.barrier()
 					
 					#circuit.append(CXGate().control(num_ctrl_qubits=len(ctrls)),ctrls+[self.st["st{0}".format(self.horizon)][-1]])
-					circuit.mct(ctrls,self.st["st{0}".format(self.horizon)][-1],None,mode="noancilla")
+					circuit.mcx([q for q in ctrls] , len(ctrls), ancilla_qubits=[q for q in ancilla_reg], mode="v-chain")
+					#circuit.MCMT(XGate(),ctrls,self.st["st{0}".format(self.horizon)][-1])#,None,mode="noancilla")
 					circuit.barrier()
 
 					circuit.h(self.st["st{0}".format(self.horizon)][-1])
@@ -445,30 +497,59 @@ class quantum_sparse_sampling:
 			
 			qcGrover = {}
 			c=0
+			measured=False
+			best_measure_counts = 0
 			while it < max_it:
 				qcGrover = QuantumCircuit()
 				qcGrover+=self.qc
+				ancilla_qubits = len(self.ctrls) - 2
+				ancilla_mct = QuantumRegister(ancilla_qubits)
+				qcGrover.add_register(ancilla_mct)
+
+				
 				g_it = np.random.randint(it) + 1
+				print("g_it - ",g_it)
+				#print("INSIDE QSEARCH - {}".format(g_it))
+
 				for i in range(g_it):
-					self.Grover_Iterate(qcGrover,self.ctrls,self.regs)
+					self.Grover_Iterate(qcGrover,self.ctrls,self.regs, ancilla_mct)
 				
 				qcGrover.measure_all()
 				r,rc = execute_locally(qcGrover,nshots=shots,backend=backend)
-				best_measure = max(rc.items(), key=operator.itemgetter(1))[0]
-				
-				reward_measure = int(best_measure[(self.sqbits*self.horizon):(self.sqbits*self.horizon)+1],2)
+				measure = max(rc.items(), key=operator.itemgetter(1))[0]
+				print(measure)
+				measure_c = max(rc.items(), key=operator.itemgetter(1))[1]
+				print(measure_c)
+				measure_counts = rc[measure]
+				print(measure_counts)
+				#print(best_measure)
+				reward_measure = int(measure[(self.sqbits*self.horizon) + ancilla_qubits],2)
+				print("reward - {}".format(reward_measure))
 				if reward_measure:
-					break
+					c+=g_it
+					if measure_counts > best_measure_counts:
+						best_measure_counts = measure_counts
+
+						best_measure = measure
+						measured=True
+					elif measured:
+						break
+
+					#break
 				else:
-					it = min(lambd*it,max_it)
-					c+=1
+					#it = min(lambd*it,max_it)
+					#it += 1
+					c+=g_it
+					if measured:
+						break
+				it = min(lambd*it,max_it)
 				
 			if it >= max_it:
 				raise ValueError("Search not Worked! Aborted!")
 			
-			return rc,best_measure
+			return rc,best_measure, c
 
-	def solve(self,backend="qasm_simulator",shots=1,iterations=None,draw_circuit=False,amplify=False,measure_all=True,outpath=None,filename=None,plot_show=False,algorithm=None):
+	def solve(self,backend="qasm_simulator",shots=1,iterations=None,draw_circuit=False,amplify=False,measure_all=True,outpath=None,filename=None,plot_show=False,algorithm=None,n_samples=None):
 		
 		#reward_model that will serve as index for the quantum maximum finding (qmf) routine
 		#qmf - apply ST and reward_model Oracles again and circuit is the oracle for qmf 
@@ -507,15 +588,13 @@ class quantum_sparse_sampling:
 				self.ctrls += [i for i in self.st["st{0}".format(j)]]
 			
 			self.ctrls += [i for i in self.st["st{0}".format(self.horizon)][:-1]]
-
-			#self.qc_pre_amplification = self.qc.copy()
-			#self.qc_pre_amplification_inverse=self.qc.inverse().copy()
+			self.ancilla_qubits = len(self.ctrls) - 2
 			if algorithm is None:
 				if not self.was_executed:
 					
 									
 					self.qc_pre_amplification = self.qc.copy()
-					self.qc_pre_amplification_inverse=self.qc.inverse().copy()
+					self.qc_pre_amplification_inverse=self.qc.reverse_ops().copy()
 					if amplify:
 						if not iterations:
 							for i in range(int(round(np.sqrt(2*self.actions**self.horizon)))):
@@ -652,13 +731,28 @@ class quantum_sparse_sampling:
 					self.qc.remove_final_measurements()
 				else:
 					self.qc_pre_amplification = self.qc.copy()
-					self.qc_pre_amplification_inverse=self.qc.inverse().copy()
-				rc,best_measure = self.QSearch(shots=shots)
+					self.qc_pre_amplification_inverse=self.qc.reverse_ops().copy()
 				
+				if shots == 1:
+					samples_dict={}
+					iterations_per_sample = []
+					for s in range(n_samples):
+						rc,best_measure, it_sample = self.QSearch(shots=shots)
+						print(it_sample)
+						iterations_per_sample.append(it_sample)
+						if best_measure in samples_dict:
+							samples_dict[best_measure] += 1
+						else:
+							samples_dict.update(rc)
+				else:
+					rc,best_measure,iterations_per_sample = self.QSearch(shots=shots)
+
+				'''
 				if measure_all:
 					best_action = best_measure[(self.sqbits*self.horizon)+1+(self.aqbits*(self.horizon-1)):-self.sqbits]
 				else:
 					best_action = best_measure[1:]
+				'''
 				'''
 				if len(rc) > 15:
 					plt.figure(figsize=(len(rc) * 0.45,12))
@@ -667,25 +761,42 @@ class quantum_sparse_sampling:
 				plt.gcf().set_facecolor("gray")
 				#plt.bar(range(len(rc)), list(rc.values()), color="darkorange" ,align='center')
 				'''		
-				action_reward = []
+				#action_reward = []
+				action_s = []
 				new_dict={}
 				if measure_all:
-					for p in list(rc.keys()):
-						reward = p[(self.sqbits*self.horizon):(self.sqbits*self.horizon)+1]
-						action = p[(self.sqbits*self.horizon)+1+(self.aqbits*(self.horizon-1)):-self.sqbits]
-						action_reward.append(str(int(action,2))+" "+str(int(reward)))
-						### new code added from here ###
-						new_key = str(int(action,2))+" "+str(int(reward))
-						if new_key in new_dict:
-							new_dict[new_key] += rc.get(p)
-						else:
-							new_dict[new_key] = rc.get(p)
-						### until here ###
+					if shots == 1:
+					#for p in list(rc.keys()):
+						for p in list(samples_dict.keys()):
+							#reward = p[(self.sqbits*self.horizon):(self.sqbits*self.horizon)+1]
+							action = p[self.ancilla_qubits + (self.sqbits*self.horizon)+1+(self.aqbits*(self.horizon-1)):-self.sqbits]
+							#action_reward.append(str(int(action,2))+" "+str(int(reward)))
+							action_s.append(str(int(action,2)))
+							### new code added from here ###
+							new_key = str(int(action,2))
+							if new_key in new_dict:
+								new_dict[new_key] += samples_dict.get(p)
+							else:
+								new_dict[new_key] = samples_dict.get(p)
+							### until here ###
+					else:
+						for p in list(rc.keys()):
+							#reward = p[(self.sqbits*self.horizon):(self.sqbits*self.horizon)+1]
+							action = p[self.ancilla_qubits + (self.sqbits*self.horizon)+1+(self.aqbits*(self.horizon-1)):-self.sqbits]
+							#action_reward.append(str(int(action,2))+" "+str(int(reward)))
+							action_s.append(str(int(action,2)))
+							### new code added from here ###
+							new_key = str(int(action,2))
+							if new_key in new_dict:
+								new_dict[new_key] += rc.get(p)
+							else:
+								new_dict[new_key] = rc.get(p)
+							### until here ###
 				else:
 					for p in list(rc.keys()):
 						reward = p[-1]
 						action = p[1:]
-						action_reward.append(str(int(action,2))+" "+str(int(reward)))
+						action_s.append(str(int(action,2))+" "+str(int(reward)))
 
 				'''
 				plt.xticks(range(len(rc)), action_reward)
@@ -711,11 +822,10 @@ class quantum_sparse_sampling:
 				#ax.set_xticklabels(action_reward)
 				ax.set_xticklabels(list(new_dict.keys()))
 				ax.set_title('# Samples = '+str(shots),fontweight="bold",fontsize=14)
-				ax.set_xlabel(r"$\mathbf{|action\rangle |reward\rangle}$",fontsize=14)
-				ax.set_ylabel("Counts",fontweight="bold",fontsize=14)
-				#ax.axhline(np.mean(counts),linestyle="dashed",color="r",label="Average")
-				#ax.legend()
-				#plt.savefig("random_dist.png")
+				#ax.set_xlabel(r"$\mathbf{|action\rangle |reward\rangle}$",fontsize=14)
+				ax.set_xlabel(r"$\mathbf{|action\rangle}$",fontsize=14)
+				ax.set_ylabel("Samples",fontweight="bold",fontsize=14)
+				
 				def autolabel(rects):
 					"""Attach a text label above each bar in *rects*, displaying its height."""
 					for rect in rects:
@@ -736,15 +846,17 @@ class quantum_sparse_sampling:
 					else:
 						plt.savefig(filename)
 				
+				import operator
+				best_action = max(new_dict.items(), key=operator.itemgetter(1))[0]
+
 				if plot_show:			
 					plt.show()
 
-				
-				return rc,int(best_action,2)
+				return new_dict,int(best_action),iterations_per_sample
 
 		else:	
 			self.draw_circuit=draw_circuit
-			qmf_size = self.nactions*self.horizon
+			qmf_size = self.actions*self.horizon
 			# We need to pass QMF the extra registers for measuring them
 			# We want to measure the action register
 			actions = [self.qa["action{0}".format(i)] for i in range(self.horizon)]

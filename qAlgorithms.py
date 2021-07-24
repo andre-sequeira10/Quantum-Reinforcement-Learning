@@ -10,12 +10,12 @@ import math
 from qiskit.qasm import pi 
 import numpy as np
 from qiskit.aqua import AquaError
-import matplotlib.pyplot as plt
 from qiskit.aqua.components.oracles import Oracle
 from qiskit.aqua.components.initial_states import Custom
 from qiskit.aqua.algorithms import QuantumAlgorithm
 from qOracles import searchOracle,qmfOracle
-from qiskit.aqua.circuits.gates import mct  # pylint: disable=unused-import
+#from qiskit.aqua.circuits.gates import mct  # pylint: disable=unused-import
+from qiskit.circuit.library import MCMT
 from qiskit.aqua.utils import get_subsystem_density_matrix
 from qiskit.aqua import AquaError, Pluggable, PluggableType, get_pluggable_class
 import logging
@@ -418,7 +418,7 @@ class QMF:
 		self._initial_state = initial_state
 		self._search_reg = search_register
 		self._size=size
-		self._qmf_iterations = num_iterations*(math.ceil(math.sqrt(self._size))) if num_iterations is not None else 2*(math.ceil(math.sqrt(self._size)))
+		self._qmf_iterations = num_iterations*(math.ceil(math.sqrt(self._size))) if num_iterations is not None else math.ceil(math.sqrt(self._size))
 		self._max_index = max_index if max_index is not None else 0
 		self._extra_regs = extra_registers
 		self._draw_circuit=draw_circuit 
@@ -437,7 +437,7 @@ class QMF:
 				algorithm = Grover(oracle=oraculo,init_state=self._initial_state,search_register=self._search_reg,incremental=True,extra_registers=self._extra_regs)
 
 			start = timer()
-			if backend is None:
+			if backend is None or backend == "qasm_simulator":
 				backend=Aer.get_backend('qasm_simulator')
 				result = algorithm.run(backend,shots=shots)
 			else:
@@ -470,9 +470,7 @@ class QMF:
 
 from qiskit.exceptions import QiskitError
 from qiskit.circuit import Instruction
-from qiskit.extensions.standard.x import XGate, CXGate
-from qiskit.extensions.standard.ry import RYGate,CRYGate
-from qiskit.extensions.standard.rz import RZGate,CRZGate
+from qiskit.circuit.library import RZGate,CRZGate,RYGate,CRYGate,XGate, CXGate
 from qiskit.circuit.reset import Reset
 
 _EPS = 1e-10  # global variable used to chop very small numbers to zero
@@ -546,7 +544,7 @@ class ctrl_Initialize(Instruction):
 		#INVERSE DONT RESPECT THE CONTROL STATES OF CONTROLLED GATES 
 
 		initialize_instr = disentangling_circuit.to_instruction().inverse()
-		#disentangling_circuit.inverse().decompose().draw(output="text",filename="CIRCUIT1inv.txt")
+		
 
 		#initialize_instr = disentangling_circuit.to_instruction()
 
@@ -589,8 +587,7 @@ class ctrl_Initialize(Instruction):
 			#rz_mult = self._multiplex(RZGate, phis)
 			#ry_mult = self._multiplex(RYGate, thetas)
 
-			qregs = [i for i in cq] + q[i:self.num_qubits]
-			
+			qregs = [i for i in cq] + [i for i in q[i:self.num_qubits]]
 			#circuit.append(rz_mult.to_instruction(), qregs)
 			#circuit.append(ry_mult.to_instruction(), qregs)
 			#TRY TO REVERSE THE OPERATION BECAUSE INVERSE DOESNT RESPECT THE CONTROL STATES
@@ -740,7 +737,7 @@ class ctrl_Initialize(Instruction):
 		# CNOTs (by leaving out last CNOT and reversing (NOT inverting) the
 		# second lower-level multiplex)
 		multiplex_2 = self._multiplex(target_gate, list_of_angles[(list_len // 2):])
-		qregs = [i for i in cq] + [q[0:-1]]
+		qregs = [i for i in cq] + [i for i in q[0:-1]]
 		if list_len > 1:
 			circuit.append(multiplex_2.to_instruction().mirror(), qregs)
 		else:
@@ -758,7 +755,7 @@ class ctrl_Initialize(Instruction):
 			raise QiskitError("Initialize parameter vector has %d elements, therefore expects %s "
 							  "qubits. However, %s were provided." %
 							  (2**self.num_qubits, self.num_qubits, len(flat_qargs)))
-		yield flat_qargs, []
+		yield flat_qargs, cargs
 
 def ctrl_initialize(self, statevector=None, ctrl_state=None, ctrl_qubits=None, qubits=None):
 	"""Apply initialize to circuit."""
@@ -776,9 +773,9 @@ def ctrl_initialize(self, statevector=None, ctrl_state=None, ctrl_qubits=None, q
 	if not isinstance(ctrl_qubits,list):
 		ctrl_qubits = [ctrl_qubits]
 	
-	#regs=[i for i in ctrl_qubits]+[i for i in qubits]
+	regs=[i for i in ctrl_qubits]+[i for i in qubits]
 	
-	return self.append(ctrl_Initialize(statevector,ctrl_state),ctrl_qubits+qubits)
+	return self.append(ctrl_Initialize(statevector,ctrl_state),regs)
 
 
 QuantumCircuit.ctrl_initialize = ctrl_initialize
@@ -786,3 +783,118 @@ QuantumCircuit.ctrl_initialize = ctrl_initialize
 
 def QSearch():
 	pass
+
+from itertools import chain
+
+class Quantum_Tree_Search:
+	def __init__(self, tree=None, n_states=None, action_set=None) -> None:
+		super().__init__()
+
+		self.tree = tree
+		self.n_states = n_states
+		self.action_set = action_set
+		self.b_max = len(action_set)
+		self.a_qubits = int(np.ceil(np.log2(self.b_max)))
+		self.s_qubits = int(np.ceil(np.log2(self.n_states)))
+	
+	def A(self, states, constant_branching=None):
+
+		s = QuantumRegister(self.s_qubits)
+		a = QuantumRegister(self.a_qubits)
+
+		circuit = QuantumCircuit(s,a, name=r"$\mathcal{A}$")
+		
+		if constant_branching:
+			circuit.h(a)
+		
+		else:
+			for state in states:
+				a_s = len(self.tree[state])
+				state_v = [complex(0.0,0.0) for i in range(2**self.a_qubits)]
+
+				#create uniform superposition over the set of admissible actions
+				for (a_d,sprime) in self.tree[state]:
+					state_v[a_d] += complex(1/np.sqrt(a_s) , 0.0)
+
+				sbin=bin(state)[2:].zfill(self.s_qubits)
+				circuit.ctrl_initialize(statevector=state_v, ctrl_state=sbin, ctrl_qubits=[i for i in s], qubits=[i for i in a])
+
+		return circuit
+
+	def T(self, states):
+
+		s = QuantumRegister(self.s_qubits)
+		a = QuantumRegister(self.a_qubits)
+		sprime = QuantumRegister(self.s_qubits)
+
+		circuit = QuantumCircuit(s,a,sprime, name=r"$\mathcal{T}$")
+		
+		for state in states:
+			sbin=bin(state)[2:].zfill(self.s_qubits)
+
+			#create uniform superposition over the set of admissible actions
+			for (a_d,sp) in self.tree[state]:
+				state_v = [complex(0.0,0.0) for i in range(2**self.s_qubits)]
+				state_v[sp] += complex(1.0 , 0.0)
+				abin = bin(a_d)[2:].zfill(self.a_qubits)
+				ctrls = [i for i in s] + [i for i in a]
+				circuit.ctrl_initialize(statevector=state_v, ctrl_state=sbin+abin, ctrl_qubits=ctrls, qubits=[i for i in sprime])
+
+		return circuit
+
+	def traverse(self, depth=None, mode="depth"):
+
+		# == 2 means that all states have equal branching factor because function set returns branching factor and the empty list that corresponds to terminal states
+		self.constant_b = len(set(map(len,self.tree))) == 2
+		
+		if mode == "iterative_deepning":
+			pass
+		
+
+		else:
+			if depth is None:
+				raise ValueError("Depth is missing")
+			
+			
+			self.actions_d = {}
+			for d in range(depth):
+				self.actions_d["action{0}".format(d)] = QuantumRegister(self.a_qubits,"action{0}".format(d))
+
+			self.states_d = {}
+			self.states_d["states_d{0}".format(0)]=QuantumRegister(self.s_qubits,name="s{}".format(0))
+
+			for d in range(1,depth+1):
+				self.states_d["states_d{0}".format(d)] = QuantumRegister(self.s_qubits,"s{}".format(d))
+			
+			self.q_tree = QuantumCircuit()
+			self.q_tree.add_register(self.states_d["states_d{0}".format(0)])
+
+			neighbours = [0]
+			n=[]
+			for d in range(1,depth+1):
+				self.q_tree.add_register(self.actions_d["action{0}".format(d-1)])
+
+				a_d = self.A(neighbours, constant_branching=self.constant_b)
+					
+				regs = [i for i in self.states_d["states_d{0}".format(d-1)]] + [i for i in self.actions_d["action{0}".format(d-1)]]
+
+				self.q_tree.append(a_d, regs)
+
+				for s in neighbours:
+					n.append([n_s for (_,n_s) in self.tree[s]])
+
+				self.q_tree.add_register(self.states_d["states_d{0}".format(d)])
+
+				regs = [i for i in self.states_d["states_d{0}".format(d-1)]] + [i for i in self.actions_d["action{0}".format(d-1)]] + [i for i in self.states_d["states_d{0}".format(d)]]
+
+				t_d = self.T(neighbours)
+
+				self.q_tree.append(t_d, regs)
+
+				neighbours = list(chain(*n))
+
+			return self.q_tree
+	
+	def collapse(self,shots=100):
+		self.q_tree.measure_all()
+		r,rc = execute_locally(self.q_tree,nshots=shots,show=True)
