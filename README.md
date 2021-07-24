@@ -16,7 +16,7 @@ Let the qAgent interact with the environment for horizon h:
 	
 	qAgent.step(initState = initial_state , horizon = h)
 	
-Use the exponential search to reach distribution over the set of possible actions to take in initial state, A, and the correspondent approximately optimal action $$a^{*} = \argmax_{a \in A} A$$
+Use the exponential search to reach distribution over the set of possible actions to take in initial state, A, and the correspondent approximately optimal action <img src="https://render.githubusercontent.com/render/math?math=a^{*} = \argmax_{a \in A} A ">
 
 	A, a*, grover_iterations = qAgent.solve(shots=shots)
 	
